@@ -49,9 +49,10 @@ To undo the Steam → 1.0 conversion: Steam > right-click the game > Properties 
 - Click **Show details** in the launcher to see what it did.
 - Launcher errors: `%LOCALAPPDATA%\PipeLink\launcher_error.log`. The game writes `PipeLink.log` next to
   `PipeLink.asi`.
-- **Game crashes on launch after reinstalling or verifying GTA on Steam:** Steam puts its own data files back but
-  leaves an old 1.0 `gta_sa.exe` from a previous downgrade, so the launcher still reports "Ready". Rename
-  `gta_sa.exe` (e.g. to `gta_sa.exe.old`), reopen the launcher and use **Convert it**.
+- **Reinstalled or verified GTA on Steam?** Steam puts its own data files back (and can overwrite the ASI loader)
+  but leaves an old 1.0 `gta_sa.exe` in place, which makes the game crash on launch. Reopen the launcher: it spots
+  this and offers **Convert it** (and **Add it** for the ASI loader) again. On launcher versions before 1.0.0,
+  rename `gta_sa.exe` to `gta_sa.exe.old` first.
 
 ## How it works
 

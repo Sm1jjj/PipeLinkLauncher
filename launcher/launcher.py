@@ -133,9 +133,19 @@ def gta_version(d):
     return GTA_EXES.get(md5(exe), ("unknown version", False, False)) if exe else None
 
 
+def steam_restored(d):
+    """A 1.0 gta_sa.exe next to a newer Steam gta-sa.exe: Steam reinstalled or verified the game after it was
+    downgraded and put its own data files back, but left the 1.0 exe (not a Steam file) in place."""
+    old, new = (os.path.join(d, n) for n in ("gta_sa.exe", "gta-sa.exe")) if d else (None, None)
+    if not (old and os.path.isfile(old) and os.path.isfile(new)):
+        return False
+    return (GTA_EXES.get(md5(old), ("", False))[1] and GTA_EXES.get(md5(new), ("",))[0].startswith("Steam")
+            and os.path.getmtime(new) > os.path.getmtime(old))
+
+
 def can_downgrade(d):
     v = gta_version(d)
-    return bool(v) and v[0].startswith("Steam")
+    return bool(v) and (v[0].startswith("Steam") or steam_restored(d))
 
 
 def gta_status(d):
@@ -143,6 +153,8 @@ def gta_status(d):
     ver = gta_version(d)
     if not ver:
         return False, "gta_sa.exe not found in this folder"
+    if steam_restored(d):
+        return False, "Steam has put its own game files back since GTA was converted to 1.0; convert it again"
     if not ver[1]:
         return False, f"GTA is the {ver[0]} version; it needs to be 1.0 US"
     if not os.path.isfile(os.path.join(d, "gta_sa.exe")) or not os.path.isfile(os.path.join(d, "models", "gta3.img")):
@@ -153,7 +165,9 @@ def gta_status(d):
 
 def asi_loader(d):
     """Name of the ASI loader GTA has (Ultimate ASI Loader as vorbisFile.dll from the downgraders, or dinput8.dll)."""
-    if os.path.isfile(os.path.join(d, "vorbisHooked.dll")):
+    hooked, vorbis = os.path.join(d, "vorbisHooked.dll"), os.path.join(d, "vorbisFile.dll")
+    # vorbisHooked.dll is the original; if vorbisFile.dll is identical to it, Steam has overwritten the loader
+    if os.path.isfile(hooked) and os.path.isfile(vorbis) and md5(hooked) != md5(vorbis):
         return "vorbisFile.dll"
     for n in ("dinput8.dll", "winmm.dll", "dsound.dll"):
         if os.path.isfile(os.path.join(d, n)):
@@ -598,7 +612,9 @@ class App(tk.Tk):
         if not gta_exe(g):
             self.gta.show("todo", "Couldn't find GTA San Andreas. Show me where it's installed.", "Find GTA…", pick_gta)
         elif can_downgrade(g):
-            self.gta.show("todo", "Found the Steam version. The mod needs the classic version 1.0: the launcher can convert "
+            found = ("Steam has put its own game files back since GTA was converted (reinstall or Verify integrity)."
+                     if steam_restored(g) else "Found the Steam version.")
+            self.gta.show("todo", found + " The mod needs the classic version 1.0: the launcher can convert "
                                   f"it for you (downloads about {DOWNGRADE_MB} MB, takes a few minutes).",
                           "Convert it", self.on_downgrade)
         elif not gok:
