@@ -164,14 +164,14 @@ def gta_status(d):
 
 
 def asi_loader(d):
-    """Name of the ASI loader GTA has (Ultimate ASI Loader as vorbisFile.dll from the downgraders, or dinput8.dll)."""
+    """Name of the ASI loader GTA has, counting only names gta_sa.exe 1.0 imports at startup (vorbisFile.dll, as the
+    downgraders install it, or winmm.dll). dinput8.dll and dsound.dll are loaded too late: Mod Loader never starts."""
     hooked, vorbis = os.path.join(d, "vorbisHooked.dll"), os.path.join(d, "vorbisFile.dll")
     # vorbisHooked.dll is the original; if vorbisFile.dll is identical to it, Steam has overwritten the loader
     if os.path.isfile(hooked) and os.path.isfile(vorbis) and md5(hooked) != md5(vorbis):
         return "vorbisFile.dll"
-    for n in ("dinput8.dll", "winmm.dll", "dsound.dll"):
-        if os.path.isfile(os.path.join(d, n)):
-            return n
+    if os.path.isfile(os.path.join(d, "winmm.dll")):
+        return "winmm.dll"
     return None
 
 
@@ -488,11 +488,22 @@ def install_asi(gta, log):
     if asi_loader(gta):
         log("GTA already has an ASI loader (" + asi_loader(gta) + ")"); return
     z = download(ASI_ZIP, os.path.join(LINK, "dl", "Ultimate-ASI-Loader.zip"), ASI_SHA256, log)
-    inst = Installer(log)
     with zipfile.ZipFile(z) as zf:
-        inst.write(os.path.join(gta, "dinput8.dll"), zf.read("dinput8.dll"))
+        loader = zf.read("dinput8.dll")
+    inst = Installer(log)
+    # as vorbisFile.dll, which gta_sa.exe imports at startup; the loader passes the calls on to vorbisHooked.dll
+    vorbis, hooked = os.path.join(gta, "vorbisFile.dll"), os.path.join(gta, "vorbisHooked.dll")
+    if not os.path.isfile(hooked):
+        with open(vorbis, "rb") as f:
+            inst.write(hooked, f.read())
+    inst.write(vorbis, loader)
     inst.save()
-    log("installed Ultimate ASI Loader as " + os.path.join(gta, "dinput8.dll"))
+    log("installed Ultimate ASI Loader as " + vorbis)
+    # launchers before 1.0.1 installed it as dinput8.dll, which loads too late; two copies must not run either
+    old = os.path.join(gta, "dinput8.dll")
+    if os.path.isfile(old) and md5(old) == hashlib.md5(loader).hexdigest():
+        os.remove(old)
+        log("removed " + old + " (loaded too late for Mod Loader)")
 
 
 def download_skate(log):
