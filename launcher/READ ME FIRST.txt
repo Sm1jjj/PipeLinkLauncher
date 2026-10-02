@@ -1,0 +1,39 @@
+San Andreas x Skate 3 x MW2  -  PipeLink Launcher
+====================================================
+
+Skate and play Modern Warfare 2 inside GTA San Andreas. You need your OWN copies of the games:
+nothing from any game is included here. The launcher builds the mod from your files.
+
+WHAT YOU NEED
+  - GTA San Andreas. The mod needs the classic version 1.0 (US). If you have the current Steam version,
+    the launcher converts it for you ("Convert it" in step 1; downloads about 840 MB of patches).
+    To undo that later: Steam > right-click the game > Properties > Installed Files > Verify integrity.
+    Other versions (e.g. Rockstar Games Launcher) must be downgraded by hand with a GTA SA downgrader.
+  - Skate 3 (optional): your Skate 3 Xbox 360 disc file (.iso). The free Skate 3 engine it runs on is
+    downloaded by the launcher.
+  - MW2 (optional): your Call of Duty: Modern Warfare 2 game folder with the Multiplayer files.
+  - Windows 10/11 64-bit and an internet connection for the first setup.
+
+HOW TO USE
+  1. Unzip this whole folder somewhere (e.g. your Desktop). Keep the "payload" folder next to the exe.
+  2. Open PipeLinkLauncher.exe.
+  3. Follow the three steps on screen until they show a green tick (Skate 3 and MW2 are optional).
+  4. Press Install. The first time takes a few minutes.
+  5. Press Play.
+
+IN GAME
+  F6   skate (Skate 3)
+  F5   MW2 mode   -  Tab: scoreboard,  1-9 / mouse wheel: weapons,  5: killstreak
+  A controller is recommended for skating.
+
+UNINSTALL
+  Open the launcher and click "Uninstall" (bottom right). Everything it changed in your games is put back.
+
+TROUBLESHOOTING
+  Click "Show details" in the launcher to see what it did. Error details are saved to
+  %LOCALAPPDATA%\PipeLink\launcher_error.log. The game writes PipeLink.log next to PipeLink.asi.
+
+Credits: IW4L (github.com/vladtrc/iw4L, Apache-2.0; licence files and our changes are in payload\iw4l),
+Skate 3 Rust Engine (github.com/SK8-ENGINE/skate-3-rust-engine), Ultimate ASI Loader (ThirteenAG),
+GTA SA Open Downgrader (github.com/xxanqw/gtasa-open-downgrader, MIT; its patch set does the Steam -> 1.0
+conversion), xdelta3 (Joshua MacDonald, Apache-2.0; licence in payload\xdelta3).

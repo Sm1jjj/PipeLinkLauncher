@@ -1,0 +1,1757 @@
+# PipeLink gtalink changes to https://github.com/vladtrc/iw4L at bfe3c2aa700c06285c12c7cd659e3a5f42468f12
+diff --git a/Cargo.lock b/Cargo.lock
+index c941c7e..8079533 100644
+--- a/Cargo.lock
++++ b/Cargo.lock
+@@ -1947,9 +1947,11 @@ dependencies = [
+  "master_protocol",
+  "net",
+  "perf",
++ "playerstate_iw4",
+  "render",
+  "render_frontend",
+  "render_gpu",
++ "render_scene",
+  "replay",
+  "serde_json",
+  "session",
+@@ -2862,6 +2864,7 @@ name = "frame"
+ version = "0.1.0"
+ dependencies = [
+  "bevy",
++ "memmap2",
+ ]
+ 
+ [[package]]
+@@ -5584,6 +5587,7 @@ dependencies = [
+  "clipmap_iw4",
+  "diag",
+  "entity_iw4",
++ "frame",
+  "fx_iw4",
+  "gamemode_iw4",
+  "glam",
+diff --git a/crates/audio/src/aliases.rs b/crates/audio/src/aliases.rs
+index 6158fd6..9954921 100644
+--- a/crates/audio/src/aliases.rs
++++ b/crates/audio/src/aliases.rs
+@@ -211,6 +211,14 @@ fn build_bank() -> SurfaceBank {
+ 
+ static BANK: LazyLock<SurfaceBank> = LazyLock::new(build_bank);
+ 
++/// In San Andreas the local player stands on GTA's ground, not the hidden map's: GTA's surface wins.
++fn local_surface(surface_flags: u32, local_player: bool) -> u32 {
++    match frame::gtalink::surface_override() {
++        Some(gta) if local_player => gta,
++        _ => surface_flags,
++    }
++}
++
+ fn surf_slot(surface_flags: u32) -> usize {
+     let index = surface_type_index(surface_flags);
+     if index < SURFACE_TYPE_NAMES.len() {
+@@ -226,11 +234,13 @@ fn footstep_pick(
+     local_player: bool,
+     quieter: bool,
+ ) -> SurfacePick {
++    let surface_flags = local_surface(surface_flags, local_player);
+     BANK.footstep[gait.index()][usize::from(local_player)][usize::from(quieter)]
+         [surf_slot(surface_flags)]
+ }
+ 
+ fn land_pick(surface_flags: u32, local_player: bool, quieter: bool) -> SurfacePick {
++    let surface_flags = local_surface(surface_flags, local_player);
+     BANK.land[usize::from(local_player)][usize::from(quieter)][surf_slot(surface_flags)]
+ }
+ 
+diff --git a/crates/audio/src/ambient.rs b/crates/audio/src/ambient.rs
+index 5b9acbf..a786d44 100644
+--- a/crates/audio/src/ambient.rs
++++ b/crates/audio/src/ambient.rs
+@@ -484,7 +484,7 @@ fn start_map_ambient_prepared(
+             let entity = crate::backend::spawn_loop(
+                 commands,
+                 handle,
+-                Volume::Linear(0.55),
++                Volume::Linear(0.55 * ::frame::gtalink::ambient_scale()),
+                 epoch,
+                 AudioScope::Match,
+             );
+@@ -663,7 +663,7 @@ pub fn update_map_emitter_gain(
+                     &mut commands,
+                     entity,
+                     handle,
+-                    Volume::Linear(gain),
++                    Volume::Linear(gain * ::frame::gtalink::ambient_scale()),
+                     epoch.0,
+                 );
+             } else {
+@@ -673,7 +673,7 @@ pub fn update_map_emitter_gain(
+                     pan.set(pan_l, pan_r);
+                 }
+                 if let Ok(mut sink) = sinks.get_mut(entity) {
+-                    sink.set_volume(Volume::Linear(gain * settings.master_volume));
++                    sink.set_volume(Volume::Linear(gain * settings.master_volume * ::frame::gtalink::ambient_scale()));
+                     if sink.is_paused() {
+                         sink.play();
+                     }
+diff --git a/crates/audio/src/background.rs b/crates/audio/src/background.rs
+index d08c38e..da51b5c 100644
+--- a/crates/audio/src/background.rs
++++ b/crates/audio/src/background.rs
+@@ -94,7 +94,7 @@ pub(crate) fn prepare_background(
+     Ok(Some(PreparedBackground {
+         pcm: sound,
+         looping: flags.looping(),
+-        gain,
++        gain: gain * ::frame::gtalink::ambient_scale(),
+         speed,
+         channel: flags.channel(),
+     }))
+diff --git a/crates/audio/src/destructible_loops.rs b/crates/audio/src/destructible_loops.rs
+index 5c4d2cc..943c2f4 100644
+--- a/crates/audio/src/destructible_loops.rs
++++ b/crates/audio/src/destructible_loops.rs
+@@ -125,7 +125,7 @@ pub(crate) fn update(
+                     dist_min: sound.dist_min,
+                     dist_max: sound.dist_max,
+                     knots,
+-                    base_gain: sound.vol_min.max(0.0),
++                    base_gain: sound.vol_min.max(0.0) * ::frame::gtalink::ambient_scale(),
+                     pcm: pcm.add(audio),
+                     live_pan: None,
+                 },
+diff --git a/crates/audio/src/playback.rs b/crates/audio/src/playback.rs
+index 447c48c..beac20b 100644
+--- a/crates/audio/src/playback.rs
++++ b/crates/audio/src/playback.rs
+@@ -367,6 +367,11 @@ fn play_alias_messages(
+                 crate::backend::stop_entity_match(&mut commands, *snd_ent, epoch.0);
+                 continue;
+             }
++            AliasCommand::Play(_) | AliasCommand::PlayPitched { .. }
++                if ::frame::gtalink::mutes_other_sounds() =>
++            {
++                continue;
++            }
+             AliasCommand::Play(event) => (event, 1.0),
+             AliasCommand::PlayPitched { sound, pitch } => (sound, *pitch),
+             AliasCommand::Stop {
+diff --git a/crates/audio/src/script_ambient.rs b/crates/audio/src/script_ambient.rs
+index baf1828..b04ffb7 100644
+--- a/crates/audio/src/script_ambient.rs
++++ b/crates/audio/src/script_ambient.rs
+@@ -156,7 +156,7 @@ pub(crate) fn update_script_ambient(
+             commands.entity(entity).try_despawn();
+             continue;
+         }
+-        settings.volume = Volume::Linear(voice.base_gain * gain);
++        settings.volume = Volume::Linear(voice.base_gain * gain * ::frame::gtalink::ambient_scale());
+         if let Some(mut sink) = sink {
+             sink.set_volume(settings.volume);
+         }
+@@ -199,7 +199,7 @@ pub(crate) fn update_script_ambient(
+         start_ms: now,
+         end_ms: end,
+     };
+-    let volume = Volume::Linear(gain * voice.gain(now));
++    let volume = Volume::Linear(gain * voice.gain(now) * ::frame::gtalink::ambient_scale());
+     let entity = if loops {
+         let handle = looping.add(sound.into_looping());
+         crate::backend::spawn_loop(
+diff --git a/crates/audio/src/script_music.rs b/crates/audio/src/script_music.rs
+index 220a4fc..95763a9 100644
+--- a/crates/audio/src/script_music.rs
++++ b/crates/audio/src/script_music.rs
+@@ -137,7 +137,7 @@ pub(crate) fn update_script_music(
+         if retired.contains(&entity) {
+             continue;
+         }
+-        settings.volume = Volume::Linear(voice.gain * voice.envelope(now) * master);
++        settings.volume = Volume::Linear(voice.gain * voice.envelope(now) * master * ::frame::gtalink::ambient_scale());
+         if let Some(mut sink) = sink {
+             sink.set_volume(settings.volume);
+         }
+@@ -170,7 +170,7 @@ pub(crate) fn update_script_music(
+             return;
+         }
+     };
+-    let volume = Volume::Linear(prepared.gain * master);
++    let volume = Volume::Linear(prepared.gain * master * ::frame::gtalink::ambient_scale());
+     let entity = if prepared.looping {
+         crate::backend::spawn_loop(
+             &mut commands,
+diff --git a/crates/bootstrap/Cargo.toml b/crates/bootstrap/Cargo.toml
+index 7622c17..d4a1d1e 100644
+--- a/crates/bootstrap/Cargo.toml
++++ b/crates/bootstrap/Cargo.toml
+@@ -36,6 +36,8 @@ render_gpu.workspace = true
+ render_frontend.workspace = true
+ sim.workspace = true
+ net.workspace = true
++render_scene.workspace = true
++playerstate_iw4.workspace = true
+ ui.workspace = true
+ replay.workspace = true
+ session.workspace = true
+diff --git a/crates/bootstrap/src/gtalink.rs b/crates/bootstrap/src/gtalink.rs
+new file mode 100644
+index 0000000..e5975ef
+--- /dev/null
++++ b/crates/bootstrap/src/gtalink.rs
+@@ -0,0 +1,131 @@
++//! GTA link (main world): publishes the presented first-person view to PipeLink, sizes the
++//! hidden window to GTA's viewport, takes GTA's FOV setting and paces the hidden renderer.
++//! The protocol is `frame::gtalink`; input is `console::gtalink`, frames `render_gpu`.
++
++use std::time::{Duration, Instant};
++
++use bevy::prelude::*;
++use frame::gtalink::{self, FLAG_ADS, FLAG_ALIVE, FLAG_CROUCH, FLAG_PRONE, FLAG_SPRINT};
++use playerstate_iw4::pm_flags;
++use render_scene::camera::{FlyCamera, FpvLens};
++
++/// Hidden renderer rate while MW2 mode is on (GTA SA itself runs at 30-60).
++const ACTIVE_FPS: f32 = 90.0;
++/// While GTA does not want frames: keep the match alive, spend nothing.
++const IDLE_FPS: f32 = 15.0;
++
++pub(crate) fn window() -> Window {
++    Window {
++        title: "iw4l — gtalink".into(),
++        resolution: (1280u32, 720u32).into(),
++        visible: false,
++        focused: true,
++        ..default()
++    }
++}
++
++pub(crate) fn install(app: &mut App) {
++    app.insert_resource(bevy::winit::WinitSettings::continuous())
++        .add_systems(First, pace)
++        .add_systems(Update, follow_gta_settings)
++        .add_systems(
++            PostUpdate,
++            publish_view.after(bevy::transform::TransformSystems::Propagate),
++        );
++}
++
++fn follow_gta_settings(mut settings: ResMut<frame::GameSettings>) {
++    let Some(input) = gtalink::read_input() else {
++        return;
++    };
++    let (w, h) = (input.width.min(gtalink::MAX_W), input.height.min(gtalink::MAX_H));
++    if w >= 64
++        && h >= 64
++        && (settings.resolution.width != w || settings.resolution.height != h || settings.fullscreen)
++    {
++        settings.resolution = frame::DisplayResolution { width: w, height: h };
++        settings.fullscreen = false;
++        settings.vsync = false;
++    }
++    if input.fov >= 65.0 && input.fov <= 120.0 && (settings.fov - input.fov).abs() > 0.01 {
++        settings.fov = input.fov;
++    }
++}
++
++fn pace(mut last: Local<Option<Instant>>) {
++    let fps = if gtalink::active() { ACTIVE_FPS } else { IDLE_FPS };
++    let budget = Duration::from_secs_f32(1.0 / fps);
++    if let Some(t) = *last {
++        let spent = t.elapsed();
++        if spent < budget {
++            std::thread::sleep(budget - spent);
++        }
++    }
++    *last = Some(Instant::now());
++}
++
++fn publish_view(
++    hosts: Query<&GlobalTransform, With<FlyCamera>>,
++    lenses: Query<&Projection, With<FpvLens>>,
++    presented: Res<net::PresentedSnapshot>,
++    prediction: Res<net::ClientPredictionState>,
++    local: Res<net::LocalPresentClient>,
++    weapons: Option<Res<assets::PreparedWeapons>>,
++    screen: Res<frame::AppScreen>,
++) {
++    let Ok(host) = hosts.single() else {
++        return;
++    };
++    let fov_y = lenses
++        .iter()
++        .find_map(|p| match p {
++            Projection::Perspective(p) => Some(p.fov.to_degrees()),
++            _ => None,
++        })
++        .unwrap_or(0.0);
++    // the predicted state is what the camera was built from: its origin makes a clean eye offset
++    // (the presented snapshot lags it, which pushed GTA's eye around with MW2's own collisions)
++    let ps = prediction.0.predicted_local().or_else(|| presented.player(local.0));
++    let (_, rotation, translation) = host.to_scale_rotation_translation();
++    // camera local: x right, y up, -z forward (render_scene::camera::transform_from_iw_view)
++    let fwd = rotation * Vec3::NEG_Z;
++    let up = rotation * Vec3::Y;
++    let name = ps
++        .zip(weapons.as_deref())
++        .map(|(ps, w)| w.0.name_of(ps.weapon).to_owned())
++        .unwrap_or_default();
++    gtalink::with_header(|h| {
++        h.cam_pos = translation.to_array();
++        h.cam_fwd = fwd.to_array();
++        h.cam_up = up.to_array();
++        h.fov_y = fov_y;
++        let mut flags = 0;
++        if let Some(ps) = ps {
++            if ps.health > 0 && *screen == frame::AppScreen::InGame {
++                flags |= FLAG_ALIVE;
++            }
++            if ps.f_weapon_pos_frac > 0.5 {
++                flags |= FLAG_ADS;
++            }
++            if ps.pm_flags & pm_flags::SPRINTING != 0 {
++                flags |= FLAG_SPRINT;
++            }
++            if ps.pm_flags & pm_flags::CROUCH != 0 {
++                flags |= FLAG_CROUCH;
++            }
++            if ps.pm_flags & pm_flags::PRONE != 0 {
++                flags |= FLAG_PRONE;
++            }
++            h.player_origin = ps.origin;
++            h.view_angles = ps.viewangles;
++            h.weapon = ps.weapon;
++        }
++        h.flags = flags;
++        h.ammo_clip = -1;
++        h.ammo_stock = -1;
++        let bytes = name.as_bytes();
++        let n = bytes.len().min(h.weapon_name.len() - 1);
++        h.weapon_name = [0; 64];
++        h.weapon_name[..n].copy_from_slice(&bytes[..n]);
++    });
++}
+diff --git a/crates/bootstrap/src/launch.rs b/crates/bootstrap/src/launch.rs
+index d068f22..ff0058a 100644
+--- a/crates/bootstrap/src/launch.rs
++++ b/crates/bootstrap/src/launch.rs
+@@ -462,7 +462,9 @@ fn run_map(
+             } else {
+                 bevy::window::ExitCondition::OnAllClosed
+             },
+-            primary_window: (!dedicated).then(|| Window {
++            primary_window: (!dedicated).then(|| if frame::gtalink::enabled() {
++                crate::gtalink::window()
++            } else { Window {
+                 title: match config.role {
+                     Role::Replay => format!("iw4l — play {}", config.zone),
+                     Role::Listen | Role::Dedicated => format!("iw4l — {}", config.zone),
+@@ -471,10 +473,13 @@ fn run_map(
+                 resolution: (ACCEPTANCE_WIDTH, ACCEPTANCE_HEIGHT).into(),
+                 present_mode,
+                 ..default()
+-            }),
++            }}),
+             ..default()
+         },
+     ));
++    if frame::gtalink::enabled() && !dedicated {
++        crate::gtalink::install(&mut app);
++    }
+     if let Ok(path) = &zone_ff {
+         app.insert_resource(LoadingPreviewSource {
+             path: path.clone(),
+diff --git a/crates/bootstrap/src/lib.rs b/crates/bootstrap/src/lib.rs
+index 688b3ef..8603ee9 100644
+--- a/crates/bootstrap/src/lib.rs
++++ b/crates/bootstrap/src/lib.rs
+@@ -1,6 +1,7 @@
+ pub mod args;
+ pub mod bench;
+ mod frame_owner;
++mod gtalink;
+ mod launch;
+ mod plugins;
+ 
+diff --git a/crates/console/src/gtalink.rs b/crates/console/src/gtalink.rs
+new file mode 100644
+index 0000000..d262b1d
+--- /dev/null
++++ b/crates/console/src/gtalink.rs
+@@ -0,0 +1,112 @@
++//! GTA link input: GTA's keyboard and mouse (sampled by PipeLink, `common/mw2link.h`) become the
++//! same scripted inputs the console verbs `hold` / `release` / `mousemove` use, and GTA's console
++//! lines (give, spawn, ...) join the console queue.
++
++use bevy::prelude::*;
++use frame::gtalink::{self, InputSnapshot, button};
++
++use crate::{ConsoleInputState, ConsoleQueue};
++
++#[derive(Default)]
++pub(crate) struct GtaLinkInput {
++    last: Option<InputSnapshot>,
++    cmd_read: Option<u32>,
++}
++
++const HOLDS: [(u32, &str); 9] = [
++    (button::ATTACK, "+attack"),
++    (button::ADS, "+speed_throw"),
++    (button::RELOAD, "+usereload"),
++    (button::SPRINT, "+breath_sprint"),
++    (button::MELEE, "+melee"),
++    (button::JUMP, "+gostand"),
++    (button::FRAG, "+frag"),
++    (button::SMOKE, "+smoke"),
++    (button::HOLDBREATH, "+holdbreath"),
++];
++
++const EDGES: [(u32, &str); 4] = [
++    (button::CROUCH, "togglecrouch"),
++    (button::PRONE, "toggleprone"),
++    (button::WEAPNEXT, "weapnext"),
++    (button::USE, "+activate"),
++];
++
++pub(crate) fn feed_gta_input(
++    mut state: Local<GtaLinkInput>,
++    mut scripted: ResMut<ConsoleInputState>,
++    mut queue: ResMut<ConsoleQueue>,
++    mut devices: ResMut<frame::InputDevices>,
++    screen: Option<Res<frame::AppScreen>>,
++) {
++    let Some(input) = gtalink::read_input() else {
++        return;
++    };
++    devices.focused = true; // the window is hidden; GTA has the user's focus
++    // console lines from GTA (also while MW2 mode is off: loadout changes)
++    // GTA resets the ring when it starts IW4L, so everything in it is for this process
++    // (they wait for the match: give / class need a live player)
++    let in_game = screen.is_some_and(|s| *s == frame::AppScreen::InGame);
++    let read = state.cmd_read.get_or_insert(0);
++    while in_game && *read != input.cmd_write {
++        if let Some(line) = gtalink::command(*read)
++            && !line.trim().is_empty()
++        {
++            diag::info!(Launch, "gtalink: {line}");
++            queue.push_line(&line);
++        }
++        *read = read.wrapping_add(1);
++    }
++    let on = input.mode == 1;
++    let prev = state.last.filter(|_| on);
++    if !on {
++        if state.last.is_some_and(|last| last.mode == 1) {
++            for (_, name) in HOLDS {
++                scripted.release(name);
++            }
++            for name in ["+forward", "+back", "+moveleft", "+moveright"] {
++                scripted.release(name);
++            }
++        }
++        state.last = Some(input);
++        return;
++    }
++    for (bit, name) in HOLDS {
++        if input.held(bit) {
++            scripted.hold(name);
++        } else {
++            scripted.release(name);
++        }
++    }
++    for (bit, name) in EDGES {
++        let was = prev.is_some_and(|p| p.held(bit));
++        if input.held(bit) && !was {
++            if name.starts_with('+') {
++                scripted.press(name, 0.1);
++            } else {
++                queue.push_line(name);
++            }
++        }
++    }
++    let [fwd, right] = input.move_;
++    for (on, name) in [
++        (fwd > 0.3, "+forward"),
++        (fwd < -0.3, "+back"),
++        (right > 0.3, "+moveright"),
++        (right < -0.3, "+moveleft"),
++    ] {
++        if on {
++            scripted.hold(name);
++        } else {
++            scripted.release(name);
++        }
++    }
++    if let Some(prev) = prev {
++        let dx = input.mouse[0].wrapping_sub(prev.mouse[0]);
++        let dy = input.mouse[1].wrapping_sub(prev.mouse[1]);
++        if dx != 0 || dy != 0 {
++            scripted.queue_mouse(dx as f32, dy as f32);
++        }
++    }
++    state.last = Some(input);
++}
+diff --git a/crates/console/src/lib.rs b/crates/console/src/lib.rs
+index 31ff273..2bf2034 100644
+--- a/crates/console/src/lib.rs
++++ b/crates/console/src/lib.rs
+@@ -21,6 +21,7 @@ mod debug_view_proj;
+ mod debug_vision;
+ mod diagnostics;
+ pub mod editor;
++mod gtalink;
+ mod feature_dispatch;
+ mod frontend;
+ mod gamepad;
+diff --git a/crates/console/src/plugin/mod.rs b/crates/console/src/plugin/mod.rs
+index 71e738d..d302c41 100644
+--- a/crates/console/src/plugin/mod.rs
++++ b/crates/console/src/plugin/mod.rs
+@@ -112,6 +112,13 @@ impl Plugin for ConsolePlugin {
+                     .after(InputSystems)
+                     .before(publish_client_action_input),
+             )
++            .add_systems(
++                PreUpdate,
++                crate::gtalink::feed_gta_input
++                    .after(crate::gamepad::track_active_pad)
++                    .after(crate::gamepad::drive_menus_with_pad)
++                    .before(publish_client_action_input),
++            )
+             .add_systems(
+                 Update,
+                 crate::user_settings::apply_pad_layout_setting
+diff --git a/crates/frame/Cargo.toml b/crates/frame/Cargo.toml
+index d3a3d4b..43adc9f 100644
+--- a/crates/frame/Cargo.toml
++++ b/crates/frame/Cargo.toml
+@@ -7,6 +7,7 @@ description = "Shared frame TOC labels and session identity. No plugins, no syst
+ 
+ [dependencies]
+ bevy.workspace = true
++memmap2 = "0.9"
+ 
+ [lints]
+ workspace = true
+diff --git a/crates/frame/src/gtalink.rs b/crates/frame/src/gtalink.rs
+new file mode 100644
+index 0000000..075fd64
+--- /dev/null
++++ b/crates/frame/src/gtalink.rs
+@@ -0,0 +1,366 @@
++//! GTA link: IW4L as the first-person weapon layer of GTA San Andreas (PipeLink).
++//!
++//! On when `IW4L_GTALINK` names a folder holding (or receiving) `frame.bin` and
++//! `input.bin`. The layout is `common/mw2link.h` in the PipeLink tree; offsets
++//! below must stay in step with it. In this mode the renderer draws only the
++//! viewmodel and its FX, exports every frame, and the sim reports each pellet.
++
++use std::sync::atomic::{AtomicBool, AtomicU32, Ordering, fence};
++use std::sync::{Mutex, OnceLock};
++
++pub const SLOTS: usize = 3;
++pub const MAX_W: u32 = 2560;
++pub const MAX_H: u32 = 1440;
++pub const HEADER: usize = 4096;
++pub const SLOT_BYTES: usize = 4 * MAX_W as usize * MAX_H as usize;
++pub const INPUT_BYTES: usize = 65536;
++pub const SHOTS: usize = 64;
++pub const CMDS: usize = 32;
++pub const CMD_LEN: usize = 256;
++pub const KILLS: usize = 32;
++const FRAME_MAGIC: u32 = 0x3257_4C47;
++const INPUT_MAGIC: u32 = 0x4957_4C47;
++const VERSION: u32 = 1;
++
++pub const FLAG_ALIVE: u32 = 1;
++pub const FLAG_ADS: u32 = 2;
++pub const FLAG_SPRINT: u32 = 4;
++pub const FLAG_CROUCH: u32 = 8;
++pub const FLAG_PRONE: u32 = 16;
++pub const SHOT_PROJECTILE: u32 = 1;
++
++pub mod button {
++    pub const ATTACK: u32 = 0;
++    pub const ADS: u32 = 1;
++    pub const RELOAD: u32 = 2;
++    pub const SPRINT: u32 = 3;
++    pub const MELEE: u32 = 4;
++    pub const JUMP: u32 = 5;
++    pub const CROUCH: u32 = 6;
++    pub const PRONE: u32 = 7;
++    pub const USE: u32 = 8;
++    pub const FRAG: u32 = 9;
++    pub const SMOKE: u32 = 10;
++    pub const WEAPNEXT: u32 = 11;
++    pub const SLOT1: u32 = 12;
++    pub const SLOT2: u32 = 13;
++    pub const SLOT3: u32 = 14;
++    pub const SLOT4: u32 = 15;
++    pub const HOLDBREATH: u32 = 16;
++    pub const COUNT: u32 = 17;
++}
++
++#[repr(C, packed(4))]
++#[derive(Clone, Copy, Default)]
++pub struct Shot {
++    pub seq: u32,
++    pub weapon: u32,
++    pub dir: [f32; 3],
++    pub damage: f32,
++    pub min_damage: f32,
++    pub max_damage_range: f32,
++    pub min_damage_range: f32,
++    pub range: f32,
++    pub flags: u32,
++}
++
++#[repr(C, packed(4))]
++pub struct FrameHeader {
++    pub magic: u32,
++    pub version: u32,
++    pub seq: u32,
++    pub slot: u32,
++    pub width: u32,
++    pub height: u32,
++    pub flags: u32,
++    pub frame_no: u32,
++    pub cam_pos: [f32; 3],
++    pub cam_fwd: [f32; 3],
++    pub cam_up: [f32; 3],
++    pub player_origin: [f32; 3],
++    pub fov_y: f32,
++    pub view_angles: [f32; 3],
++    pub ammo_clip: i32,
++    pub ammo_stock: i32,
++    pub weapon: u32,
++    pub weapon_name: [u8; 64],
++    pub shot_write: u32,
++    pub shots: [Shot; SHOTS],
++    pub score: u32,
++    pub kills: u32,
++    pad: [u8; 3072 - 3000],
++    pub slot_gen: [u32; SLOTS],
++}
++
++#[repr(C, packed(4))]
++#[derive(Clone, Copy)]
++pub struct Kill {
++    pub points: i32,
++    pub flags: u32,
++}
++
++#[repr(C, packed(4))]
++pub struct InputHeader {
++    pub magic: u32,
++    pub mode: u32,
++    pub width: u32,
++    pub height: u32,
++    pub gta_frame: u32,
++    pub buttons: u32,
++    pub move_: [f32; 2],
++    pub mouse_x: i32,
++    pub mouse_y: i32,
++    pub fov: f32,
++    pub reading: u32,
++    pub cmd_write: u32,
++    pub kill_write: u32,
++    pub surface: u32,
++    pad: [u8; 64 - 60],
++    pub cmds: [[u8; CMD_LEN]; CMDS],
++    pub kills: [Kill; KILLS],
++}
++
++const _: () = assert!(core::mem::size_of::<Shot>() == 44);
++const _: () = assert!(core::mem::offset_of!(FrameHeader, shots) == 176);
++const _: () = assert!(core::mem::offset_of!(FrameHeader, score) == 2992);
++const _: () = assert!(core::mem::offset_of!(FrameHeader, slot_gen) == 3072);
++const _: () = assert!(core::mem::size_of::<FrameHeader>() <= HEADER);
++const _: () = assert!(core::mem::offset_of!(InputHeader, surface) == 56);
++const _: () = assert!(core::mem::offset_of!(InputHeader, cmds) == 64);
++const _: () = assert!(core::mem::offset_of!(InputHeader, kills) == 8256);
++
++struct Link {
++    frame: *mut u8,
++    input: *mut u8,
++    header: Mutex<()>,
++}
++
++// SAFETY: the two mappings live for the whole process; header writes are serialised by
++// `header`, slot writes are owned by the single render-thread exporter.
++unsafe impl Send for Link {}
++unsafe impl Sync for Link {}
++
++static LINK: OnceLock<Option<Link>> = OnceLock::new();
++static ACTIVE: AtomicBool = AtomicBool::new(false);
++/// MW2 surface type + 1 under CJ's feet (0 = none): the local player's footsteps / landings use it.
++static SURFACE: AtomicU32 = AtomicU32::new(0);
++static FRAME_NO: AtomicU32 = AtomicU32::new(0);
++
++fn map(path: &std::path::Path, size: usize) -> std::io::Result<*mut u8> {
++    let file = std::fs::OpenOptions::new()
++        .read(true)
++        .write(true)
++        .create(true)
++        .truncate(false)
++        .open(path)?;
++    if file.metadata()?.len() < size as u64 {
++        file.set_len(size as u64)?;
++    }
++    // SAFETY: the file is shared with GTA on purpose; both sides follow the seq protocol.
++    let map = unsafe { memmap2::MmapOptions::new().len(size).map_mut(&file)? };
++    Ok(Box::leak(Box::new(map)).as_mut_ptr())
++}
++
++fn open() -> Option<Link> {
++    let dir = std::env::var_os("IW4L_GTALINK")?;
++    let dir = std::path::PathBuf::from(dir);
++    let _ = std::fs::create_dir_all(&dir);
++    let frame = map(&dir.join("frame.bin"), HEADER + SLOTS * SLOT_BYTES);
++    let input = map(&dir.join("input.bin"), INPUT_BYTES);
++    match (frame, input) {
++        (Ok(frame), Ok(input)) => {
++            let link = Link {
++                frame,
++                input,
++                header: Mutex::new(()),
++            };
++            // SAFETY: freshly mapped, at least HEADER bytes.
++            unsafe {
++                let h = &mut *(frame as *mut FrameHeader);
++                h.magic = FRAME_MAGIC;
++                h.version = VERSION;
++                h.seq = 0;
++                h.frame_no = 0;
++                h.shot_write = 0;
++                let i = &mut *(input as *mut InputHeader);
++                if i.magic != INPUT_MAGIC {
++                    std::ptr::write_bytes(input, 0, INPUT_BYTES);
++                    i.magic = INPUT_MAGIC;
++                }
++            }
++            Some(link)
++        }
++        (frame, input) => {
++            eprintln!(
++                "gtalink: cannot map {}: {:?} {:?}",
++                dir.display(),
++                frame.err(),
++                input.err()
++            );
++            None
++        }
++    }
++}
++
++fn link() -> Option<&'static Link> {
++    LINK.get_or_init(open).as_ref()
++}
++
++/// The process runs as GTA's weapon layer.
++pub fn enabled() -> bool {
++    link().is_some()
++}
++
++/// MW2's map ambience, emitters and music under GTA: off (San Andreas has its own). Under GTA only the
++/// weapon sounds (fire, reload, handling) and footsteps / landings play; see `mutes_other_sounds`.
++pub fn ambient_scale() -> f32 {
++    if enabled() { 0.0 } else { 1.0 }
++}
++
++/// Under GTA every other MW2 sound (announcer, impacts, explosions in the hidden map, breath, tinnitus, ...)
++/// is dropped.
++pub fn mutes_other_sounds() -> bool {
++    enabled()
++}
++
++/// The surface GTA reports under CJ, as IW4 surface flags (type << 20), while MW2 mode is on.
++pub fn surface_override() -> Option<u32> {
++    let s = SURFACE.load(Ordering::Relaxed);
++    (active() && s != 0).then(|| (s - 1) << 20)
++}
++
++/// GTA currently wants frames (MW2 mode on). Updated by `read_input`.
++pub fn active() -> bool {
++    ACTIVE.load(Ordering::Relaxed)
++}
++
++/// A copy of GTA's input header; also refreshes `active()`.
++pub fn read_input() -> Option<InputSnapshot> {
++    let link = link()?;
++    fence(Ordering::Acquire);
++    // SAFETY: mapped for the process lifetime; GTA writes it concurrently, torn values are tolerated.
++    let i = unsafe { &*(link.input as *const InputHeader) };
++    let snap = InputSnapshot {
++        mode: i.mode,
++        width: i.width,
++        height: i.height,
++        gta_frame: i.gta_frame,
++        buttons: i.buttons,
++        move_: i.move_,
++        mouse: [i.mouse_x, i.mouse_y],
++        fov: i.fov,
++        cmd_write: i.cmd_write,
++        kill_write: i.kill_write,
++    };
++    ACTIVE.store(snap.mode == 1, Ordering::Relaxed);
++    SURFACE.store(i.surface, Ordering::Relaxed);
++    Some(snap)
++}
++
++#[derive(Clone, Copy, Debug, Default)]
++pub struct InputSnapshot {
++    pub mode: u32,
++    pub width: u32,
++    pub height: u32,
++    pub gta_frame: u32,
++    pub buttons: u32,
++    pub move_: [f32; 2],
++    pub mouse: [i32; 2],
++    pub fov: f32,
++    pub cmd_write: u32,
++    pub kill_write: u32,
++}
++
++impl InputSnapshot {
++    pub fn held(&self, button: u32) -> bool {
++        self.buttons & (1 << button) != 0
++    }
++}
++
++/// Console line number `n` (ring position n % CMDS).
++pub fn command(n: u32) -> Option<String> {
++    let link = link()?;
++    // SAFETY: see read_input.
++    let i = unsafe { &*(link.input as *const InputHeader) };
++    let raw = &i.cmds[n as usize % CMDS];
++    let end = raw.iter().position(|&b| b == 0).unwrap_or(CMD_LEN);
++    Some(String::from_utf8_lossy(&raw[..end]).into_owned())
++}
++
++pub fn kill(n: u32) -> Option<Kill> {
++    let link = link()?;
++    // SAFETY: see read_input.
++    let i = unsafe { &*(link.input as *const InputHeader) };
++    Some(i.kills[n as usize % KILLS])
++}
++
++/// The slot GTA is copying right now (never overwrite it).
++pub fn gta_reading_slot() -> Option<usize> {
++    let link = link()?;
++    // SAFETY: see read_input.
++    let r = unsafe { (*(link.input as *const InputHeader)).reading };
++    (r > 0).then(|| (r - 1) as usize)
++}
++
++/// Writes header fields under the seq protocol.
++pub fn with_header(f: impl FnOnce(&mut FrameHeader)) {
++    let Some(link) = link() else {
++        return;
++    };
++    let _guard = link.header.lock().unwrap_or_else(|e| e.into_inner());
++    // SAFETY: header access is serialised by the guard; GTA only reads.
++    let h = unsafe { &mut *(link.frame as *mut FrameHeader) };
++    h.seq = h.seq.wrapping_add(1) | 1;
++    fence(Ordering::Release);
++    f(h);
++    fence(Ordering::Release);
++    h.seq = h.seq.wrapping_add(1);
++}
++
++/// Queues one pellet for GTA.
++pub fn push_shot(mut shot: Shot) {
++    with_header(|h| {
++        let n = h.shot_write;
++        shot.seq = n.wrapping_add(1);
++        h.shots[n as usize % SHOTS] = shot;
++        h.shot_write = n.wrapping_add(1);
++    });
++}
++
++/// The render-thread exporter: copies one finished frame (BGRA, premultiplied, top-down rows,
++/// `row_pitch` bytes per source row) into a free slot and publishes it.
++pub fn publish_frame(width: u32, height: u32, src: &[u8], row_pitch: usize) {
++    let Some(link) = link() else {
++        return;
++    };
++    if width == 0 || height == 0 || width > MAX_W || height > MAX_H {
++        return;
++    }
++    // SAFETY: header is HEADER bytes; slots follow it.
++    let h = unsafe { &mut *(link.frame as *mut FrameHeader) };
++    let latest = h.slot as usize % SLOTS;
++    let busy = gta_reading_slot();
++    let Some(slot) = (0..SLOTS).find(|&s| s != latest && Some(s) != busy) else {
++        return;
++    };
++    let slot_gen = &mut h.slot_gen[slot] as *mut u32;
++    // SAFETY: slot index < SLOTS, each SLOT_BYTES long.
++    unsafe {
++        slot_gen.write_volatile(slot_gen.read_volatile().wrapping_add(1) | 1);
++        fence(Ordering::Release);
++        let dst = link.frame.add(HEADER + slot * SLOT_BYTES);
++        let row = width as usize * 4;
++        for y in 0..height as usize {
++            std::ptr::copy_nonoverlapping(src.as_ptr().add(y * row_pitch), dst.add(y * row), row);
++        }
++        fence(Ordering::Release);
++        slot_gen.write_volatile(slot_gen.read_volatile().wrapping_add(1));
++    }
++    let n = FRAME_NO.fetch_add(1, Ordering::Relaxed) + 1;
++    with_header(|h| {
++        h.slot = slot as u32;
++        h.width = width;
++        h.height = height;
++        h.frame_no = n;
++    });
++}
+diff --git a/crates/frame/src/lib.rs b/crates/frame/src/lib.rs
+index d085366..108b7a1 100644
+--- a/crates/frame/src/lib.rs
++++ b/crates/frame/src/lib.rs
+@@ -1,4 +1,5 @@
+ pub mod class_presets;
++pub mod gtalink;
+ pub mod pad;
+ pub mod retire;
+ pub mod schedule;
+diff --git a/crates/hud/src/iris.rs b/crates/hud/src/iris.rs
+index 3b5697c..e361e6f 100644
+--- a/crates/hud/src/iris.rs
++++ b/crates/hud/src/iris.rs
+@@ -20,6 +20,21 @@ pub(crate) struct IrisLetterboxFill {
+     rgba: Option<[u8; 4]>,
+ }
+ 
++/// The ADS scope overlay for the GTA link, which exports the frame before this 2D HUD: render_gpu draws it into
++/// the exported frame. Rects are (left, top, right, bottom) as fractions of the screen; `alpha` 0 = no scope.
++#[derive(Resource, Clone, Default)]
++pub struct GtaLinkScope {
++    pub image: Option<AssetId<Image>>,
++    pub alpha: f32,
++    pub quads: [[f32; 4]; 4],
++    /// bit 0: flip s, bit 1: flip t
++    pub flips: [u32; 4],
++    pub n: u32,
++    /// outside it: the letterbox, in `fill_rgba`
++    pub fill_rect: [f32; 4],
++    pub fill_rgba: [f32; 4],
++}
++
+ #[derive(Component, Clone, Copy)]
+ pub(crate) struct AdsIrisOverlay(u8);
+ 
+@@ -138,6 +153,7 @@ pub(crate) fn update_iris(
+     mut gaps: ResMut<HudPresentationGaps>,
+     mut fill: ResMut<IrisLetterboxFill>,
+     aim: Res<ViewweaponAim>,
++    mut gta_scope: ResMut<GtaLinkScope>,
+     mut overlay: Query<
+         (&mut Node, &mut ImageNode, &AdsIrisOverlay),
+         (With<AdsIrisOverlay>, Without<AdsIrisLetterbox>),
+@@ -152,6 +168,7 @@ pub(crate) fn update_iris(
+         Without<AdsIrisOverlay>,
+     >,
+ ) {
++    *gta_scope = GtaLinkScope::default();
+     let Some(ps) = presented.player(local.0) else {
+         gaps.clear(HudGap::AdsOverlay);
+         hide_overlay(&mut overlay);
+@@ -272,6 +289,19 @@ pub(crate) fn update_iris(
+     let inner_top = (cy + xhair.1 + layout.inner_y * factor).round();
+     let inner_right = (cx + xhair.0 + (layout.inner_x + layout.inner_w) * factor).round();
+     let inner_bottom = (cy + xhair.1 + (layout.inner_y + layout.inner_h) * factor).round();
++    let (sw, sh) = (scale.width().max(1.0), scale.height().max(1.0));
++    gta_scope.image = Some(handle.id());
++    gta_scope.alpha = alpha;
++    gta_scope.fill_rect = [0.0, 0.0, 1.0, 1.0];
++    for (i, quad) in layout.live_quads().iter().take(4).enumerate() {
++        let left = (cx + xhair.0 + quad.x * factor).round();
++        let top = (cy + xhair.1 + quad.y * factor).round();
++        let right = (cx + xhair.0 + (quad.x + quad.w) * factor).round();
++        let bottom = (cy + xhair.1 + (quad.y + quad.h) * factor).round();
++        gta_scope.quads[i] = [left / sw, top / sh, right / sw, bottom / sh];
++        gta_scope.flips[i] = u32::from(quad.flip_s) | (u32::from(quad.flip_t) << 1);
++        gta_scope.n = i as u32 + 1;
++    }
+     for (mut node, mut image_node, slot) in overlay.iter_mut() {
+         let Some(quad) = layout.live_quads().get(usize::from(slot.0)) else {
+             adopt_display(&mut node, Display::None);
+@@ -319,6 +349,13 @@ pub(crate) fn update_iris(
+     let fill_top = (inner_top + frame_y).clamp(0.0, scale.height());
+     let fill_bottom = (inner_bottom - frame_y).clamp(fill_top, scale.height());
+     let fill_width = fill_right - fill_left;
++    gta_scope.fill_rect = [fill_left / sw, fill_top / sh, fill_right / sw, fill_bottom / sh];
++    gta_scope.fill_rgba = [
++        f32::from(fill.rgba[0]) / 255.0,
++        f32::from(fill.rgba[1]) / 255.0,
++        f32::from(fill.rgba[2]) / 255.0,
++        1.0,
++    ];
+     let screen_w = scale.width().round();
+     let screen_h = scale.height().round();
+     for (mut node, mut image_node, mut bg, strip) in letterbox.iter_mut() {
+diff --git a/crates/hud/src/lib.rs b/crates/hud/src/lib.rs
+index 37d944d..450c9d1 100644
+--- a/crates/hud/src/lib.rs
++++ b/crates/hud/src/lib.rs
+@@ -36,6 +36,7 @@ pub use draw2d::{
+     TEXT_STYLE_HUDELEM, TextRunFx, tessellate, tessellate_fonts,
+ };
+ pub use gaps::{GapCause, HudGap, HudPresentationGaps};
++pub use iris::GtaLinkScope;
+ pub use gpu_list::{HudTessBatch, HudTessGpuFrame, HudTessTechnique, HudTessVertex};
+ pub use hudelem::HudElemSoundLatch;
+ pub use menus::ScriptMenus;
+diff --git a/crates/hud/src/plugin.rs b/crates/hud/src/plugin.rs
+index eb8c893..1e52fb8 100644
+--- a/crates/hud/src/plugin.rs
++++ b/crates/hud/src/plugin.rs
+@@ -15,7 +15,7 @@ use crate::hud_elems::{
+     HudElemsBackRaster, HudElemsRaster, spawn_hud_elems, spawn_hud_elems_back, update_hud_elems,
+ };
+ use crate::images::HudImages;
+-use crate::iris::{IrisLetterboxFill, spawn_iris, update_iris};
++use crate::iris::{GtaLinkScope, IrisLetterboxFill, spawn_iris, update_iris};
+ use crate::killcam_skip::{KillcamSkipRaster, spawn_killcam_skip, update_killcam_skip};
+ use crate::killfeed::{KillfeedRaster, KillfeedWindow, spawn_killfeed, update_killfeed};
+ use crate::mantle_hint::{MantleHintRaster, spawn_mantle_hint, update_mantle_hint};
+@@ -42,6 +42,7 @@ impl Plugin for HudPlugin {
+             .init_resource::<HudPresentationGaps>()
+             .init_resource::<ReticleAdsLatch>()
+             .init_resource::<IrisLetterboxFill>()
++            .init_resource::<GtaLinkScope>()
+             .init_resource::<BloodOverlayLatch>()
+             .init_resource::<BloodGpuJob>()
+             .init_resource::<FlashWhiteoutLatch>()
+diff --git a/crates/render_frontend/src/adapters/fx/system.rs b/crates/render_frontend/src/adapters/fx/system.rs
+index b4e410f..c818915 100644
+--- a/crates/render_frontend/src/adapters/fx/system.rs
++++ b/crates/render_frontend/src/adapters/fx/system.rs
+@@ -741,7 +741,13 @@ fn commit_fx_transaction(
+         }
+     }
+     let eye = cam_tf.translation.to_array();
++    // GTA link: only the effects on the gun itself (flash, muzzle smoke) join the viewmodel layer;
++    // the hidden MW2 map's ambient FX, lights, trails and tracers are not San Andreas.
++    let gtalink = frame::gtalink::enabled();
+     for light in &post_lights {
++        if gtalink {
++            break;
++        }
+         let Some(tess) = fx_iw4::post_light_generate_verts(light, eye) else {
+             env.post_lights.skipped_short = env.post_lights.skipped_short.saturating_add(1);
+             continue;
+@@ -776,6 +782,11 @@ fn commit_fx_transaction(
+     let mut batches: HashMap<usize, Vec<&FxSpriteInstance>> = HashMap::new();
+     let sprites_total = out.sprites.len();
+     for sprite in &out.sprites {
++        if gtalink
++            && (Vec3::from_array(sprite.origin) - cam_tf.translation).length() > GTALINK_FX_RADIUS
++        {
++            continue;
++        }
+         let Some(asset_id) = sprite.material_index else {
+             cursor.draw_miss_material = cursor.draw_miss_material.saturating_add(1);
+             plan.miss_material = plan.miss_material.saturating_add(1);
+@@ -852,6 +863,9 @@ fn commit_fx_transaction(
+ 
+     let mut trails_drawn = 0usize;
+     for mesh in &out.trail_meshes {
++        if gtalink {
++            break;
++        }
+         let Some(asset_id) = mesh.material_index else {
+             host.0.gaps.raise(FxGapCause::TrailCodeMeshRefused {
+                 step: CodeMeshStep::Bind,
+@@ -938,7 +952,8 @@ fn commit_fx_transaction(
+         }
+     }
+ 
+-    present_tracer_beams(
++    if !gtalink {
++        present_tracer_beams(
+         &mut tracers,
+         &cam_tf,
+         clip_from_world,
+@@ -949,6 +964,7 @@ fn commit_fx_transaction(
+         &mut combat,
+         code_mesh_bind_asset,
+     );
++    }
+     *tracer_world = tracers;
+ 
+     let mut spark_drawn = 0usize;
+@@ -2616,7 +2632,9 @@ fn explosion(
+                 asset_game::WeaponSoundSlot::ProjectileExplosion,
+                 &bank.0,
+             )
+-        });
++        })
++        // under GTA the explosion is San Andreas' own (with its sound); this one is in the hidden map
++        .filter(|_| !::frame::gtalink::mutes_other_sounds());
+     if let (Some(alias), Some(sounds)) = (alias, sounds.as_deref_mut()) {
+         sounds.write(audio::WeaponSound {
+             namespace: weapons
+@@ -2841,7 +2859,13 @@ fn play_fx(
+     }
+ }
+ 
++/// Inches from the eye within which an FX sprite counts as the gun's own (GTA link).
++const GTALINK_FX_RADIUS: f32 = 96.0;
++
+ fn play_fx_bullet_hit(hit: On<net::EntityBulletHit>, mut hits: MessageWriter<BulletHitFx>) {
++    if frame::gtalink::enabled() {
++        return; // the hit is in MW2's hidden map; GTA draws San Andreas' own impacts
++    }
+     hits.write(BulletHitFx(hit.event.payload));
+ }
+ 
+diff --git a/crates/render_gpu/src/drawsurf/colour_submit/prepare_camera.rs b/crates/render_gpu/src/drawsurf/colour_submit/prepare_camera.rs
+index 93028fd..4842135 100644
+--- a/crates/render_gpu/src/drawsurf/colour_submit/prepare_camera.rs
++++ b/crates/render_gpu/src/drawsurf/colour_submit/prepare_camera.rs
+@@ -1203,6 +1203,7 @@ fn prepare_camera_rows(
+         census_on,
+         sun_shadow_view_ready,
+     } = *input;
++    let gtalink_only = frame::gtalink::enabled();
+     let mut ready_draws = 0u32;
+     let mut refused_draws = 0u32;
+     let mut pipeline_not_ready = 0u32;
+@@ -1491,6 +1492,14 @@ fn prepare_camera_rows(
+                     ready_draws = ready_draws.saturating_add(1);
+                     submitted_keys.push(item.key);
+                 }
++                // GTA link: San Andreas is the world; only the viewmodel and the (already culled)
++                // FX are recorded. The rest still counts as prepared, so readiness gates pass.
++                if gtalink_only
++                    && !viewmodel
++                    && !matches!(item.kind, RetainedDrawKind::CodeMesh { .. })
++                {
++                    dest.truncate(dest_start);
++                }
+             }
+             Err(cause) => {
+                 refused_draws = refused_draws.saturating_add(1);
+diff --git a/crates/render_gpu/src/drawsurf/draw.rs b/crates/render_gpu/src/drawsurf/draw.rs
+index 51d2a7c..6d529f1 100644
+--- a/crates/render_gpu/src/drawsurf/draw.rs
++++ b/crates/render_gpu/src/drawsurf/draw.rs
+@@ -28,6 +28,7 @@ pub(crate) fn register_drawsurf_render(app: &mut App) {
+     );
+     super::colour_submit::register(app);
+     super::sun_effects::register(app);
++    super::gtalink_export::register(app);
+     super::postfx::register(app);
+     super::iw_tess::register(app);
+     super::model_lighting_tiles::register(app);
+diff --git a/crates/render_gpu/src/drawsurf/gtalink_export.rs b/crates/render_gpu/src/drawsurf/gtalink_export.rs
+new file mode 100644
+index 0000000..3fced8b
+--- /dev/null
++++ b/crates/render_gpu/src/drawsurf/gtalink_export.rs
+@@ -0,0 +1,380 @@
++//! GTA link: copies every finished viewmodel frame (before the 2D HUD) into the shared
++//! `frame.bin` that PipeLink composites over San Andreas. See `frame::gtalink`.
++//!
++//! A full-screen pass packs colour + depth coverage into BGRA, the result is copied into one of
++//! three readback buffers, mapped after submit and handed to `frame::gtalink::publish_frame`
++//! from whichever later frame finds it mapped.
++//!
++//! A scoped sniper hides the gun and shows a 2D overlay (black frame, clear lens), which MW2 draws
++//! with the HUD, after this pass: `hud::GtaLinkScope` carries it here and the shader draws it into
++//! the exported frame.
++
++use std::num::NonZeroU64;
++use std::sync::Arc;
++use std::sync::atomic::{AtomicU8, Ordering};
++
++use bevy::core_pipeline::{Core3d, Core3dSystems};
++use bevy::prelude::*;
++use bevy::render::RenderStartup;
++use bevy::render::render_asset::RenderAssets;
++use bevy::render::render_resource::binding_types::{
++    sampler, texture_2d, texture_depth_2d, uniform_buffer_sized,
++};
++use bevy::render::render_resource::{
++    BufferInitDescriptor, Sampler, SamplerBindingType, SamplerDescriptor,
++};
++use bevy::render::texture::GpuImage;
++use bevy::render::{Extract, ExtractSchedule};
++use bevy::render::render_resource::{
++    BindGroupEntries, BindGroupLayoutDescriptor, BindGroupLayoutEntries, Buffer, BufferDescriptor,
++    BufferUsages, CachedRenderPipelineId, ColorTargetState, ColorWrites, Extent3d, FragmentState,
++    LoadOp, MapMode, Operations, PipelineCache, PrimitiveState, RenderPassColorAttachment,
++    RenderPassDescriptor, RenderPipelineDescriptor, ShaderStages, StoreOp, TexelCopyBufferInfo,
++    TexelCopyBufferLayout, Texture, TextureDescriptor, TextureDimension, TextureFormat,
++    TextureSampleType, TextureUsages, TextureView, TextureViewDescriptor, VertexState,
++};
++use bevy::render::renderer::{RenderContext, RenderDevice, ViewQuery};
++use bevy::render::view::ViewTarget;
++use bevy::render::{Render, RenderApp, RenderSystems};
++use bevy::shader::Shader;
++
++use super::scene_depth::{SCENE_DEPTH_ATTACHED, SceneDepthTexture};
++
++const SHADER_PATH: &str = "embedded://render_gpu/drawsurf/gtalink_export.wgsl";
++const RING: usize = 3;
++/// `Scope` in the shader: quads[4], flips, fill_rect, fill_rgba, params (alpha, n, has_depth, 0)
++const SCOPE_SIZE: u64 = 128;
++
++const IDLE: u8 = 0;
++const COPIED: u8 = 1;
++const MAPPING: u8 = 2;
++const MAPPED: u8 = 3;
++const FAILED: u8 = 4;
++
++struct Readback {
++    buffer: Buffer,
++    state: Arc<AtomicU8>,
++    width: u32,
++    height: u32,
++    pitch: u32,
++}
++
++#[derive(Resource)]
++struct GtaLinkExport {
++    shader: Handle<Shader>,
++    layout: BindGroupLayoutDescriptor,
++    pipeline: Option<CachedRenderPipelineId>,
++    target: Option<(Texture, TextureView, u32, u32)>,
++    no_overlay: TextureView,
++    sampler: Sampler,
++    ring: Vec<Option<Readback>>,
++    next: usize,
++}
++
++fn init(mut commands: Commands, asset_server: Res<AssetServer>, device: Res<RenderDevice>) {
++    let layout = BindGroupLayoutDescriptor::new(
++        "gtalink_export",
++        &BindGroupLayoutEntries::sequential(
++            ShaderStages::FRAGMENT,
++            (
++                texture_2d(TextureSampleType::Float { filterable: false }),
++                texture_depth_2d(),
++                uniform_buffer_sized(false, NonZeroU64::new(SCOPE_SIZE)),
++                texture_2d(TextureSampleType::Float { filterable: true }),
++                sampler(SamplerBindingType::Filtering),
++            ),
++        ),
++    );
++    // bound when there is no scope overlay (the shader never samples it then)
++    let no_overlay = device
++        .create_texture(&TextureDescriptor {
++            label: Some("gtalink_no_overlay"),
++            size: Extent3d {
++                width: 1,
++                height: 1,
++                depth_or_array_layers: 1,
++            },
++            mip_level_count: 1,
++            sample_count: 1,
++            dimension: TextureDimension::D2,
++            format: TextureFormat::Rgba8Unorm,
++            usage: TextureUsages::TEXTURE_BINDING,
++            view_formats: &[],
++        })
++        .create_view(&TextureViewDescriptor::default());
++    commands.insert_resource(GtaLinkExport {
++        shader: asset_server.load(SHADER_PATH),
++        layout,
++        pipeline: None,
++        target: None,
++        no_overlay,
++        sampler: device.create_sampler(&SamplerDescriptor::default()),
++        ring: (0..RING).map(|_| None).collect(),
++        next: 0,
++    });
++}
++
++fn prepare(gpu: Option<ResMut<GtaLinkExport>>, cache: Res<PipelineCache>, device: Res<RenderDevice>) {
++    let Some(mut gpu) = gpu else {
++        return;
++    };
++    if gpu.pipeline.is_none() {
++        gpu.pipeline = Some(cache.queue_render_pipeline(RenderPipelineDescriptor {
++            label: Some("gtalink_export".into()),
++            layout: vec![gpu.layout.clone()],
++            immediate_size: 0,
++            vertex: VertexState {
++                shader: gpu.shader.clone(),
++                shader_defs: Vec::new(),
++                entry_point: Some("vs_main".into()),
++                buffers: Vec::new(),
++            },
++            fragment: Some(FragmentState {
++                shader: gpu.shader.clone(),
++                shader_defs: Vec::new(),
++                entry_point: Some("fs_main".into()),
++                targets: vec![Some(ColorTargetState {
++                    format: TextureFormat::Rgba8Unorm,
++                    blend: None,
++                    write_mask: ColorWrites::ALL,
++                })],
++            }),
++            primitive: PrimitiveState::default(),
++            depth_stencil: None,
++            multisample: default(),
++            zero_initialize_workgroup_memory: false,
++        }));
++    }
++    // hand finished readbacks to GTA
++    let _ = device.poll(bevy::render::render_resource::PollType::Poll);
++    for slot in gpu.ring.iter_mut() {
++        let Some(rb) = slot else {
++            continue;
++        };
++        match rb.state.load(Ordering::Acquire) {
++            MAPPED => {
++                {
++                    let view = rb.buffer.slice(..).get_mapped_range();
++                    frame::gtalink::publish_frame(rb.width, rb.height, &view, rb.pitch as usize);
++                }
++                rb.buffer.unmap();
++                rb.state.store(IDLE, Ordering::Release);
++            }
++            FAILED => *slot = None,
++            _ => {}
++        }
++    }
++}
++
++fn extract_scope(mut commands: Commands, scope: Extract<Option<Res<hud::GtaLinkScope>>>) {
++    commands.insert_resource(scope.as_deref().cloned().unwrap_or_default());
++}
++
++fn scope_bytes(scope: &hud::GtaLinkScope, has_overlay: bool, has_depth: bool) -> Vec<u8> {
++    let mut b = Vec::with_capacity(SCOPE_SIZE as usize);
++    for q in scope.quads {
++        for v in q {
++            b.extend_from_slice(&v.to_le_bytes());
++        }
++    }
++    for v in scope.flips {
++        b.extend_from_slice(&v.to_le_bytes());
++    }
++    let params = [
++        if has_overlay { scope.alpha } else { 0.0 },
++        scope.n.min(4) as f32,
++        if has_depth { 1.0 } else { 0.0 },
++        0.0,
++    ];
++    for v in scope.fill_rect.into_iter().chain(scope.fill_rgba).chain(params) {
++        b.extend_from_slice(&v.to_le_bytes());
++    }
++    debug_assert_eq!(b.len() as u64, SCOPE_SIZE);
++    b
++}
++
++#[allow(clippy::too_many_arguments)]
++fn draw(
++    view: ViewQuery<(&ViewTarget, &SceneDepthTexture)>,
++    gpu: Option<ResMut<GtaLinkExport>>,
++    scope: Option<Res<hud::GtaLinkScope>>,
++    images: Res<RenderAssets<GpuImage>>,
++    cache: Res<PipelineCache>,
++    device: Res<RenderDevice>,
++    mut context: RenderContext,
++) {
++    let Some(mut gpu) = gpu else {
++        return;
++    };
++    let has_depth = SCENE_DEPTH_ATTACHED.swap(false, std::sync::atomic::Ordering::Relaxed);
++    if !frame::gtalink::active() {
++        return;
++    }
++    let Some(pipeline) = gpu.pipeline.and_then(|id| cache.get_render_pipeline(id)) else {
++        return;
++    };
++    let (target, depth) = view.into_inner();
++    let size = target.main_texture().size();
++    let (w, h) = (size.width, size.height);
++    if w == 0 || h == 0 || w > frame::gtalink::MAX_W || h > frame::gtalink::MAX_H {
++        return;
++    }
++    // a free readback buffer of the right size, else skip this frame
++    let index = (0..RING)
++        .map(|k| (gpu.next + k) % RING)
++        .find(|&i| match &gpu.ring[i] {
++            None => true,
++            Some(rb) => rb.state.load(Ordering::Acquire) == IDLE,
++        });
++    let Some(index) = index else {
++        return;
++    };
++    gpu.next = (index + 1) % RING;
++    let pitch = RenderDevice::align_copy_bytes_per_row(w as usize * 4) as u32;
++    if gpu.ring[index]
++        .as_ref()
++        .is_none_or(|rb| rb.width != w || rb.height != h)
++    {
++        gpu.ring[index] = Some(Readback {
++            buffer: device.create_buffer(&BufferDescriptor {
++                label: Some("gtalink_readback"),
++                size: u64::from(pitch) * u64::from(h),
++                usage: BufferUsages::MAP_READ | BufferUsages::COPY_DST,
++                mapped_at_creation: false,
++            }),
++            state: Arc::new(AtomicU8::new(IDLE)),
++            width: w,
++            height: h,
++            pitch,
++        });
++    }
++    if gpu.target.as_ref().is_none_or(|t| t.2 != w || t.3 != h) {
++        let texture = device.create_texture(&TextureDescriptor {
++            label: Some("gtalink_export"),
++            size: Extent3d {
++                width: w,
++                height: h,
++                depth_or_array_layers: 1,
++            },
++            mip_level_count: 1,
++            sample_count: 1,
++            dimension: TextureDimension::D2,
++            format: TextureFormat::Rgba8Unorm,
++            usage: TextureUsages::RENDER_ATTACHMENT | TextureUsages::COPY_SRC,
++            view_formats: &[],
++        });
++        let view = texture.create_view(&TextureViewDescriptor::default());
++        gpu.target = Some((texture, view, w, h));
++    }
++    let Some((texture, out_view, _, _)) = gpu.target.as_ref() else {
++        return;
++    };
++    let scope = scope.as_deref().cloned().unwrap_or_default();
++    let overlay = scope
++        .image
++        .filter(|_| scope.alpha > 0.0)
++        .and_then(|id| images.get(id));
++    let uniform = device.create_buffer_with_data(&BufferInitDescriptor {
++        label: Some("gtalink_scope"),
++        contents: &scope_bytes(&scope, overlay.is_some(), has_depth),
++        usage: BufferUsages::UNIFORM,
++    });
++    let (overlay_view, overlay_sampler) = match overlay {
++        Some(image) => (&image.texture_view, &image.sampler),
++        None => (&gpu.no_overlay, &gpu.sampler),
++    };
++    let bind = device.create_bind_group(
++        Some("gtalink_export"),
++        &cache.get_bind_group_layout(&gpu.layout),
++        &BindGroupEntries::sequential((
++            target.main_texture_view(),
++            depth.view(),
++            uniform.as_entire_binding(),
++            overlay_view,
++            overlay_sampler,
++        )),
++    );
++    let encoder = context.command_encoder();
++    {
++        let mut pass = encoder.begin_render_pass(&RenderPassDescriptor {
++            label: Some("gtalink_export"),
++            color_attachments: &[Some(RenderPassColorAttachment {
++                view: out_view,
++                resolve_target: None,
++                ops: Operations {
++                    load: LoadOp::Clear(LinearRgba::NONE.into()),
++                    store: StoreOp::Store,
++                },
++                depth_slice: None,
++            })],
++            depth_stencil_attachment: None,
++            timestamp_writes: None,
++            occlusion_query_set: None,
++            multiview_mask: None,
++        });
++        pass.set_pipeline(pipeline);
++        pass.set_bind_group(0, &bind, &[]);
++        pass.draw(0..3, 0..1);
++    }
++    let Some(rb) = gpu.ring[index].as_ref() else {
++        return;
++    };
++    encoder.copy_texture_to_buffer(
++        texture.as_image_copy(),
++        TexelCopyBufferInfo {
++            buffer: &rb.buffer,
++            layout: TexelCopyBufferLayout {
++                offset: 0,
++                bytes_per_row: Some(pitch),
++                rows_per_image: Some(h),
++            },
++        },
++        Extent3d {
++            width: w,
++            height: h,
++            depth_or_array_layers: 1,
++        },
++    );
++    rb.state.store(COPIED, Ordering::Release);
++}
++
++// after the frame's submit: start mapping what was copied
++fn map_copied(gpu: Option<Res<GtaLinkExport>>) {
++    let Some(gpu) = gpu else {
++        return;
++    };
++    for rb in gpu.ring.iter().flatten() {
++        if rb
++            .state
++            .compare_exchange(COPIED, MAPPING, Ordering::AcqRel, Ordering::Acquire)
++            .is_err()
++        {
++            continue;
++        }
++        let state = rb.state.clone();
++        rb.buffer.slice(..).map_async(MapMode::Read, move |result| {
++            state.store(if result.is_ok() { MAPPED } else { FAILED }, Ordering::Release);
++        });
++    }
++}
++
++pub(super) fn register(app: &mut App) {
++    if !frame::gtalink::enabled() {
++        return;
++    }
++    bevy::asset::embedded_asset!(app, "gtalink_export.wgsl");
++    let Some(render_app) = app.get_sub_app_mut(RenderApp) else {
++        return;
++    };
++    render_app
++        .add_systems(RenderStartup, init)
++        .add_systems(ExtractSchedule, extract_scope)
++        .add_systems(Render, prepare.in_set(RenderSystems::Prepare))
++        .add_systems(Render, map_copied.in_set(RenderSystems::Cleanup))
++        .add_systems(
++            Core3d,
++            draw.in_set(Core3dSystems::PostProcess)
++                .after(super::postfx::PostFxSet)
++                .before(super::iw_tess::IwTessSet),
++        );
++}
+diff --git a/crates/render_gpu/src/drawsurf/gtalink_export.wgsl b/crates/render_gpu/src/drawsurf/gtalink_export.wgsl
+new file mode 100644
+index 0000000..8c28216
+--- /dev/null
++++ b/crates/render_gpu/src/drawsurf/gtalink_export.wgsl
+@@ -0,0 +1,67 @@
++// GTA link export: the finished viewmodel layer as BGRA with premultiplied alpha.
++// Alpha is coverage from the scene depth (cleared to 0, reverse Z): the hands and gun are
++// opaque, the additive FX drawn over the black clear (muzzle flash, smoke) keep alpha 0 and
++// therefore add onto San Andreas exactly as they add onto MW2's own scene.
++// A scoped sniper's 2D overlay (drawn by MW2's HUD after this pass) is drawn over that here:
++// its clear lens stays alpha 0, so San Andreas shows through it.
++
++struct Scope {
++    quads: array<vec4<f32>, 4>,   // left, top, right, bottom (screen fractions)
++    flips: vec4<u32>,             // bit 0 flip s, bit 1 flip t
++    fill_rect: vec4<f32>,         // outside it: the letterbox, in fill_rgba
++    fill_rgba: vec4<f32>,
++    params: vec4<f32>,            // overlay alpha (0 = none), quad count, scene depth valid this frame
++}
++
++@group(0) @binding(0) var scene_tex: texture_2d<f32>;
++@group(0) @binding(1) var depth_tex: texture_depth_2d;
++@group(0) @binding(2) var<uniform> scope: Scope;
++@group(0) @binding(3) var overlay_tex: texture_2d<f32>;
++@group(0) @binding(4) var overlay_smp: sampler;
++
++struct Out {
++    @builtin(position) clip: vec4<f32>,
++}
++
++@vertex
++fn vs_main(@builtin(vertex_index) i: u32) -> Out {
++    let uv = vec2<f32>(f32((i << 1u) & 2u), f32(i & 2u));
++    var o: Out;
++    o.clip = vec4<f32>(uv * 2.0 - 1.0, 0.0, 1.0);
++    return o;
++}
++
++fn inside(p: vec2<f32>, r: vec4<f32>) -> bool {
++    return p.x >= r.x && p.x < r.z && p.y >= r.y && p.y < r.w;
++}
++
++@fragment
++fn fs_main(o: Out) -> @location(0) vec4<f32> {
++    let p = vec2<i32>(o.clip.xy);
++    let c = textureLoad(scene_tex, p, 0);
++    let z = textureLoad(depth_tex, p, 0);
++    // no pass attached the depth this frame (nothing drawn, e.g. the gun hidden at full ADS): it is stale
++    let a = select(0.0, 1.0, z > 0.0 && scope.params.z > 0.5);
++    var out = vec4<f32>(c.b, c.g, c.r, a);
++    let alpha = scope.params.x;
++    if alpha > 0.0 {
++        let f = o.clip.xy / vec2<f32>(textureDimensions(scene_tex));
++        var s = scope.fill_rgba;
++        if inside(f, scope.fill_rect) {
++            s = vec4<f32>(0.0);
++        }
++        let n = u32(scope.params.y);
++        for (var i = 0u; i < n; i++) {
++            let r = scope.quads[i];
++            if inside(f, r) {
++                var uv = (f - r.xy) / max(r.zw - r.xy, vec2<f32>(1e-6));
++                if (scope.flips[i] & 1u) != 0u { uv.x = 1.0 - uv.x; }
++                if (scope.flips[i] & 2u) != 0u { uv.y = 1.0 - uv.y; }
++                s = textureSampleLevel(overlay_tex, overlay_smp, uv, 0.0);
++            }
++        }
++        let sa = s.a * alpha;
++        out = vec4<f32>(s.b * sa, s.g * sa, s.r * sa, sa) + out * (1.0 - sa);
++    }
++    return out;
++}
+diff --git a/crates/render_gpu/src/drawsurf/iw_tess.rs b/crates/render_gpu/src/drawsurf/iw_tess.rs
+index 75b87ab..051843f 100644
+--- a/crates/render_gpu/src/drawsurf/iw_tess.rs
++++ b/crates/render_gpu/src/drawsurf/iw_tess.rs
+@@ -431,6 +431,10 @@ fn prepare_iw_tess(
+     queue.write_buffer(&pipeline.params, 0, bytemuck::bytes_of(&coeffs));
+ }
+ 
++/// The 2D HUD pass (the GTA link exports the frame just before it).
++#[derive(SystemSet, Clone, Debug, PartialEq, Eq, Hash)]
++pub(super) struct IwTessSet;
++
+ fn draw_iw_tess(
+     view: ViewQuery<(&ViewTarget, &ExtractedView)>,
+     extracted: Res<ExtractedIwTess>,
+@@ -759,6 +763,7 @@ pub(super) fn register(app: &mut App) {
+             Core3d,
+             draw_iw_tess
+                 .in_set(Core3dSystems::PostProcess)
++                .in_set(IwTessSet)
+                 .after(super::postfx::PostFxSet),
+         );
+ }
+diff --git a/crates/render_gpu/src/drawsurf/mod.rs b/crates/render_gpu/src/drawsurf/mod.rs
+index 12b0f40..d4bab72 100644
+--- a/crates/render_gpu/src/drawsurf/mod.rs
++++ b/crates/render_gpu/src/drawsurf/mod.rs
+@@ -6,6 +6,7 @@ mod draw;
+ mod exact_pipeline;
+ mod floatz;
+ mod geometry_diagnostic;
++mod gtalink_export;
+ mod gpu_prepare;
+ mod gpu_resources;
+ mod hud_blood;
+diff --git a/crates/render_gpu/src/drawsurf/scene_depth.rs b/crates/render_gpu/src/drawsurf/scene_depth.rs
+index 1e6d867..92712f0 100644
+--- a/crates/render_gpu/src/drawsurf/scene_depth.rs
++++ b/crates/render_gpu/src/drawsurf/scene_depth.rs
+@@ -15,12 +15,18 @@ pub struct SceneDepthTexture {
+     sampled: TextureView,
+ }
+ 
++/// Set whenever a pass attaches (and so clears, the first time in a frame) the scene depth. The GTA link export
++/// takes it: without it the depth texture still holds an older frame (e.g. the scope tube before full ADS).
++pub(crate) static SCENE_DEPTH_ATTACHED: std::sync::atomic::AtomicBool =
++    std::sync::atomic::AtomicBool::new(false);
++
+ impl SceneDepthTexture {
+     pub fn view(&self) -> &TextureView {
+         &self.sampled
+     }
+ 
+     pub fn get_attachment(&self, store: StoreOp) -> RenderPassDepthStencilAttachment<'_> {
++        SCENE_DEPTH_ATTACHED.store(true, std::sync::atomic::Ordering::Relaxed);
+         let mut attachment = self.attachment.get_attachment(store);
+         attachment.stencil_ops = Some(Operations {
+             load: if attachment
+diff --git a/crates/sim/Cargo.toml b/crates/sim/Cargo.toml
+index d67a8ed..7cdaaa9 100644
+--- a/crates/sim/Cargo.toml
++++ b/crates/sim/Cargo.toml
+@@ -17,6 +17,7 @@ clipmap_iw4.workspace = true
+ gamemode_iw4.workspace = true
+ hud_iw4.workspace = true
+ weapon_iw4.workspace = true
++frame.workspace = true
+ entity_iw4.workspace = true
+ anim_iw4.workspace = true
+ fx_iw4.workspace = true
+diff --git a/crates/sim/src/combat.rs b/crates/sim/src/combat.rs
+index f843c6b..46f8027 100644
+--- a/crates/sim/src/combat.rs
++++ b/crates/sim/src/combat.rs
+@@ -1038,6 +1038,43 @@ pub fn spread_direction_on_plane(
+     }
+ }
+ 
++/// GTA link: GTA traces every pellet against San Andreas and applies the damage.
++fn gtalink_shot(weapon: u32, dir: [f32; 3], facts: &weapon_iw4::WeaponCombatFacts, flags: u32) {
++    ::frame::gtalink::push_shot(::frame::gtalink::Shot {
++        weapon,
++        dir,
++        damage: facts.damage as f32,
++        min_damage: facts.min_damage as f32,
++        max_damage_range: facts.max_damage_range,
++        min_damage_range: facts.min_damage_range,
++        range: facts.bullet_range(),
++        flags,
++        ..Default::default()
++    });
++}
++
++/// Only the authority reports (prediction steps the same shot with its own aim), and only once.
++fn gtalink_first_sight(seed: u32, weapon: u32, pellet: u16) -> bool {
++    static SEEN: std::sync::Mutex<std::collections::VecDeque<(u32, u32, u16)>> =
++        std::sync::Mutex::new(std::collections::VecDeque::new());
++    let mut seen = SEEN.lock().unwrap_or_else(|e| e.into_inner());
++    let key = (seed, weapon, pellet);
++    if seen.contains(&key) {
++        return false;
++    }
++    if seen.len() >= 512 {
++        seen.pop_front();
++    }
++    seen.push_back(key);
++    true
++}
++
++fn angles_forward(angles: [f32; 3]) -> [f32; 3] {
++    let (sp, cp) = angles[0].to_radians().sin_cos();
++    let (sy, cy) = angles[1].to_radians().sin_cos();
++    [cp * cy, cp * sy, -sp]
++}
++
+ pub(crate) fn phase_emit(world: &FrameWorld, shots: &[AcceptedShot]) -> Vec<Emission> {
+     let mut out = Vec::new();
+     for shot in shots {
+@@ -1051,7 +1088,16 @@ pub(crate) fn phase_emit(world: &FrameWorld, shots: &[AcceptedShot]) -> Vec<Emis
+                     continue;
+                 }
+             }
+-            _ => continue,
++            kind => {
++                if kind.is_some()
++                    && ::frame::gtalink::enabled()
++                    && world.publishes_snapshot()
++                    && gtalink_first_sight(shot.combat_seed, shot.weapon, u16::MAX)
++                {
++                    gtalink_shot(shot.weapon, angles_forward(shot.angles), &facts, ::frame::gtalink::SHOT_PROJECTILE);
++                }
++                continue;
++            }
+         }
+         let mut rng = MatchRng::new(shot.combat_seed as u64);
+         let pellet_count = facts.pellet_count().clamp(1, u16::MAX as i32) as u16;
+@@ -1069,6 +1115,13 @@ pub(crate) fn phase_emit(world: &FrameWorld, shots: &[AcceptedShot]) -> Vec<Emis
+                 max_range: facts.bullet_range(),
+                 base_damage: facts.damage,
+             });
++            if ::frame::gtalink::enabled()
++                && world.publishes_snapshot()
++                && let Some(last) = out.last()
++                && gtalink_first_sight(shot.combat_seed, shot.weapon, pellet)
++            {
++                gtalink_shot(shot.weapon, last.direction, &facts, 0);
++            }
+         }
+     }
+     out
