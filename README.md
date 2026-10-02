@@ -1,28 +1,72 @@
 # PipeLink Launcher
 
-Installer and launcher for the **GTA San Andreas × Skate 3 × MW2** mashup. Players bring their own games; the
-launcher builds the mod from their files and installs it. No game files are in this repo or in the release zip.
+Installer and launcher for the **GTA San Andreas × Skate 3 × MW2** mashup: skate (Skate 3) and play Modern Warfare 2
+modes inside GTA San Andreas.
 
-Players: download `PipeLinkLauncher.zip` from Releases and read `READ ME FIRST.txt` inside it.
+> [!IMPORTANT]
+> **No game files are distributed here.** This repository and its release downloads contain **no** files from
+> GTA San Andreas, Skate 3 or Call of Duty: Modern Warfare 2: no executables, models, maps, textures, audio or
+> anything else from those games. You need your **own legally obtained copies** of the games. The launcher builds
+> the mod on your PC from the files you already own, and changes nothing until you press a button.
+>
+> This is a fan project. It is not affiliated with or endorsed by Rockstar Games, Take-Two Interactive, EA,
+> Activision or any of the projects it uses.
 
-## What it does
+## What you need
 
-Three steps in a simple window, then Install and Play:
+- **GTA San Andreas** (required), version **1.0 US**. If you have the current **Steam** version, the launcher
+  converts it for you ("Convert it" in step 1; downloads about 840 MB of patches from
+  [GTA SA Open Downgrader](https://github.com/xxanqw/gtasa-open-downgrader)). Other versions (e.g. Rockstar Games
+  Launcher) must be downgraded by hand with a GTA SA downgrader first.
+- **Skate 3** (optional): your own Skate 3 Xbox 360 disc image (`.iso`). The free
+  [Skate 3 Rust Engine](https://github.com/SK8-ENGINE/skate-3-rust-engine) it runs on is downloaded by the launcher.
+- **MW2** (optional): your own Call of Duty: Modern Warfare 2 game folder with the Multiplayer files.
+- Windows 10/11 64-bit and an internet connection for the first setup.
 
-1. **GTA San Andreas** (required): finds it through Steam. The current Steam release is converted to 1.0 US
-   ("Convert it") with the patch set of [GTA SA Open Downgrader](https://github.com/xxanqw/gtasa-open-downgrader);
-   every file is MD5-checked before and after, the exe goes last so an interrupted run resumes. Adds
-   [Ultimate ASI Loader](https://github.com/ThirteenAG/Ultimate-ASI-Loader) if GTA has no ASI loader.
-2. **Skate 3** (optional): downloads [Skate 3 Rust Engine](https://github.com/SK8-ENGINE/skate-3-rust-engine)
-   build 28 (the build the mod was verified on) and runs its setup, where the player picks their Skate 3 ISO.
-3. **MW2** (optional): the player points it at their MW2 Multiplayer folder.
+## Install
 
-Install then converts the player's GTA collision into a Skate 3 map (`tools/gta_to_skate.py`), builds the skateboard
-model from their Skate 3 files (`tools/skate_board_to_dff.py`), and installs `PipeLink.asi` + `PipeLink.ini`,
-the Skate bridge and Lua mod, and IW4L (MW2 runtime). Every download is pinned by SHA-256. Uninstall restores
-every file it replaced (`%LOCALAPPDATA%\PipeLink\installed.json`).
+1. Download `PipeLinkLauncher.zip` from [Releases](../../releases).
+2. Unzip the **whole** folder somewhere (e.g. your Desktop). Keep the `payload` folder next to the exe.
+3. Open `PipeLinkLauncher.exe`.
+4. Follow the three steps on screen until they show a green tick (Skate 3 and MW2 are optional):
+   1. **GTA San Andreas**: the launcher finds it through Steam, or click to show it the folder. Convert it to 1.0
+      if asked, and let it add the ASI Loader if your game doesn't have one.
+   2. **Skate 3**: downloads the Skate 3 engine, then asks for your Skate 3 ISO.
+   3. **MW2**: point it at your MW2 Multiplayer folder.
+5. Press **Install**. The first time takes a few minutes.
+6. Press **Play**.
 
-## Layout
+**In game:** `F6` skate (Skate 3). `F5` MW2 mode: `Tab` scoreboard, `1`-`9` / mouse wheel weapons, `5` killstreak.
+A controller is recommended for skating.
+
+## Uninstall
+
+Open the launcher and click **Uninstall** (bottom right). Every file it changed in your games is put back.
+To undo the Steam → 1.0 conversion: Steam > right-click the game > Properties > Installed Files > Verify integrity.
+
+## Troubleshooting
+
+- Click **Show details** in the launcher to see what it did.
+- Launcher errors: `%LOCALAPPDATA%\PipeLink\launcher_error.log`. The game writes `PipeLink.log` next to
+  `PipeLink.asi`.
+- **Game crashes on launch after reinstalling or verifying GTA on Steam:** Steam puts its own data files back but
+  leaves an old 1.0 `gta_sa.exe` from a previous downgrade, so the launcher still reports "Ready". Rename
+  `gta_sa.exe` (e.g. to `gta_sa.exe.old`), reopen the launcher and use **Convert it**.
+
+## How it works
+
+The launcher downloads only free, open tools, each pinned by SHA-256, and builds everything else from your games:
+
+- Converts Steam GTA SA to 1.0 US with GTA SA Open Downgrader's patch set (fetched from its author's server; every
+  file is MD5-checked before and after, the exe goes last so an interrupted run resumes). Adds
+  [Ultimate ASI Loader](https://github.com/ThirteenAG/Ultimate-ASI-Loader) if GTA has no ASI loader.
+- Converts **your** GTA collision into a Skate 3 map (`tools/gta_to_skate.py`) and builds the skateboard model from
+  **your** Skate 3 files (`tools/skate_board_to_dff.py`).
+- Installs `PipeLink.asi` + `PipeLink.ini`, the Skate bridge and Lua mod, and IW4L (MW2 runtime, which reads your MW2
+  files and changes nothing in them). Uninstall restores every file it replaced
+  (`%LOCALAPPDATA%\PipeLink\installed.json`).
+
+## For developers
 
 | Path | What |
 |---|---|
@@ -33,12 +77,10 @@ every file it replaced (`%LOCALAPPDATA%\PipeLink\installed.json`).
 | `third_party/iw4l/` | IW4L licences + `iw4l-gtalink.patch` (our changes to IW4L, regenerated by `build.sh`) |
 | `build.sh` | builds `dist/PipeLinkLauncher.zip` |
 
-The mod's own binaries (`PipeLink.asi`, `xinput1_4.dll`, the Skate Lua mod, `iw4l.exe`) are **not** in this repo:
+The mod's own binaries (`PipeLink.asi`, `xinput1_4.dll`, the Skate Lua mod, `iw4l.exe`) are not in this repo:
 `build.sh` takes them from the mod project (`MOD=...`, default `~/Documents/gtabmxpipe`).
 
-## Build
-
-Windows, Git Bash, Python 3 with `py -m pip install pyinstaller numpy pillow`, and the mod project with its
+**Build:** Windows, Git Bash, Python 3 with `py -m pip install pyinstaller numpy pillow`, and the mod project with its
 toolchain (llvm-mingw) and a built IW4L (`cargo build --profile play -p launcher` in `mw2/iw4l`).
 
 ```sh
@@ -48,17 +90,24 @@ sh build.sh            # or: MOD=/path/to/gtabmxpipe sh build.sh
 Output: `dist/PipeLinkLauncher.zip` (~64 MB). The script fails if the self-test or the IW4L patch is empty.
 Run from source while developing: `py launcher/launcher.py` (uses `build/launcher_payload` from the last build).
 
-## Publishing notes
+Release notes:
 
 - Upload the zip as a **GitHub Release asset**, not into the repo: `iw4l.exe` is ~100 MB, over GitHub's file limit.
 - IW4L is Apache-2.0: ship its `LICENSE`, `NOTICE`, font licences and the change patch (all in `payload\iw4l`).
-- The Steam → 1.0 conversion downloads Open Downgrader's patch set from its author's server
-  (`files.xxanqw.me`); it contains a full 1.0 `gta_sa.exe`. If that file changes, the pinned hash stops the
-  conversion until `DOWNGRADE_SHA256` is updated.
-- Pick a licence for this launcher before publishing (none is set yet).
+- The Steam → 1.0 patch set is downloaded from its author's server, never rehosted here. If it changes, the pinned
+  hash stops the conversion until `DOWNGRADE_SHA256` is updated.
 
-## Tested (2026-10-02)
+## Credits
 
-Packaged exe, headless, in a sandbox "player PC" with real downloads: install output byte-identical to a working
-setup, uninstall removes everything. Real Steam → 1.0 on genuine Steam files: 16/16 files MD5-identical to a working
-1.0 install in 56 s. Not yet: a real player's Skate 3 ISO setup through the launcher, a full play session.
+- [IW4L](https://github.com/vladtrc/iw4L) (Apache-2.0; licence files and our changes in `third_party/iw4l`)
+- [Skate 3 Rust Engine](https://github.com/SK8-ENGINE/skate-3-rust-engine)
+- [Ultimate ASI Loader](https://github.com/ThirteenAG/Ultimate-ASI-Loader) by ThirteenAG
+- [GTA SA Open Downgrader](https://github.com/xxanqw/gtasa-open-downgrader) (MIT): its patch set does the Steam → 1.0
+  conversion
+- [xdelta3](https://github.com/jmacd/xdelta) by Joshua MacDonald (Apache-2.0; licence in `third_party/xdelta3`)
+
+## License
+
+The launcher and tools in this repository are released under the [MIT License](LICENSE): use, copy, modify and
+share them however you like. Third-party components keep their own licences (see `third_party/`). Game content is
+owned by its publishers and is not included or licensed here.

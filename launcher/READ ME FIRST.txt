@@ -37,3 +37,5 @@ Credits: IW4L (github.com/vladtrc/iw4L, Apache-2.0; licence files and our change
 Skate 3 Rust Engine (github.com/SK8-ENGINE/skate-3-rust-engine), Ultimate ASI Loader (ThirteenAG),
 GTA SA Open Downgrader (github.com/xxanqw/gtasa-open-downgrader, MIT; its patch set does the Steam -> 1.0
 conversion), xdelta3 (Joshua MacDonald, Apache-2.0; licence in payload\xdelta3).
+
+Licence: PipeLink Launcher is MIT licensed (github.com/Sm1jjj/PipeLinkLauncher). No game files are distributed with it.
