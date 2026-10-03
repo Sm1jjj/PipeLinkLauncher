@@ -9,8 +9,8 @@ Nothing from any game ships with it. The player points it at their own copies; i
 
 Dev:  py launcher/launcher.py           (payload from build/launcher_payload, see tools/package_launcher.sh)
 """
-import contextlib, ctypes, glob, hashlib, json, os, queue, re, shutil, struct, subprocess, sys, threading
-import traceback, urllib.request, zipfile
+import contextlib, ctypes, glob, hashlib, json, os, queue, re, shutil, struct, subprocess, sys, threading, time
+import traceback, urllib.error, urllib.request, zipfile
 import tkinter as tk
 from tkinter import filedialog, messagebox, ttk
 
@@ -244,14 +244,24 @@ def game_dirs(cfg):
 
 
 # ---------------------------------------------------------------- helpers used by the build
-def download(url, dst, want_sha256, log):
-    os.makedirs(os.path.dirname(dst), exist_ok=True)
-    if os.path.isfile(dst) and sha256(dst) == want_sha256:
-        return dst
-    log(f"downloading {url}")
-    req = urllib.request.Request(url, headers={"User-Agent": "PipeLinkLauncher"})
-    with urllib.request.urlopen(req, timeout=60) as r, open(dst + ".part", "wb") as f:
-        total, got, last = int(r.headers.get("Content-Length") or 0), 0, -1
+def fetch(url, part, opener, log):
+    """Download url into part with opener, resuming what part already holds when the server allows it."""
+    have = os.path.getsize(part) if os.path.isfile(part) else 0
+    headers = {"User-Agent": "PipeLinkLauncher"}
+    if have:
+        headers["Range"] = f"bytes={have}-"
+    try:
+        r = opener.open(urllib.request.Request(url, headers=headers), timeout=60)
+    except urllib.error.HTTPError as e:
+        if e.code != 416:                       # 416: part already holds the whole file
+            raise
+        return
+    with r, open(part, "ab" if r.status == 206 else "wb") as f:
+        got = have if r.status == 206 else 0
+        size = int(r.headers.get("Content-Length") or 0)
+        total, last = got + size if size else 0, -1
+        if got:
+            log(f"  resuming at {got >> 20} MB")
         while True:
             b = r.read(1 << 20)
             if not b:
@@ -260,11 +270,61 @@ def download(url, dst, want_sha256, log):
             pct = got * 100 // total if total else -1
             if pct // 10 != last // 10:
                 log(f"  {got >> 20} MB" + (f" ({pct}%)" if total else "")); last = pct
-    if sha256(dst + ".part") != want_sha256:
-        os.remove(dst + ".part")
-        raise RuntimeError(f"download did not match the expected checksum: {url}")
-    os.replace(dst + ".part", dst)
-    return dst
+        if total and got < total:
+            raise ConnectionError(f"connection closed at {got >> 20} of {total >> 20} MB")
+
+
+def fetch_bits(url, part):
+    """Windows' own downloader (BITS): uses the system network settings, incl. proxy auto-config Python ignores."""
+    with contextlib.suppress(OSError): os.remove(part)
+    ps = "$ProgressPreference='SilentlyContinue'; Start-BitsTransfer -Source $env:PL_URL -Destination $env:PL_DST"
+    res = subprocess.run(["powershell", "-NoProfile", "-NonInteractive", "-Command", ps], capture_output=True,
+                         text=True, creationflags=0x08000000, env=dict(os.environ, PL_URL=url, PL_DST=part))
+    if res.returncode:
+        raise OSError((res.stderr.strip().splitlines() or ["BITS failed"])[0][:200])
+
+
+def download(url, dst, want_sha256, log):
+    os.makedirs(os.path.dirname(dst), exist_ok=True)
+    if os.path.isfile(dst) and sha256(dst) == want_sha256:
+        return dst
+    part = dst + ".part"
+    log(f"downloading {url}")
+    # Python normally goes through the Windows proxy; a proxy/VPN that can't reach a host answers 503 etc., so also
+    # try going direct, then Windows' own downloader. Each way gets a few tries for a busy server (resuming).
+    ways = [("", lambda: fetch(url, part, urllib.request.build_opener(), log))]
+    if urllib.request.getproxies():
+        direct = urllib.request.build_opener(urllib.request.ProxyHandler({}))
+        ways.append(("without the proxy", lambda: fetch(url, part, direct, log)))
+    ways.append(("with the Windows downloader", lambda: fetch_bits(url, part)))
+    err = None
+    for name, way in ways:
+        if name:
+            log(f"  trying again {name}")
+        for attempt in range(1 if way is ways[-1][1] else 3):
+            if attempt:
+                log(f"  {err} - retrying in {5 * attempt} s"); time.sleep(5 * attempt)
+            try:
+                way()
+            except urllib.error.HTTPError as e:
+                err = f"HTTP error {e.code} ({e.reason})"
+                if e.code not in (408, 429) and e.code < 500:
+                    break                       # 403/404...: retrying the same way won't help
+                continue
+            except (OSError, ValueError) as e:  # URLError, timeouts, resets are OSErrors
+                if way is ways[-1][1] and err:  # BITS errors are cryptic; keep Python's
+                    log(f"  {e}")
+                else:
+                    err = str(e) or type(e).__name__
+                continue
+            if sha256(part) == want_sha256:
+                os.replace(part, dst)
+                return dst
+            os.remove(part)
+            err = "the file didn't match the expected checksum"
+    log(f"  download failed: {err}")
+    raise RuntimeError(f"couldn't download {os.path.basename(dst)} ({err}). Download it in your browser from "
+                       f"{url} and save it as {dst} (don't unzip it), then press the button again.")
 
 
 def write_ini(path, section, key, value):
